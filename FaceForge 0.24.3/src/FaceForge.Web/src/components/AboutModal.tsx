@@ -188,9 +188,11 @@ export default function AboutModal({
                   <div>
                     <strong>{cliStatus?.displayName ?? providerLabel(vision.provider)}</strong>
                     <small>
-                      {cliStatus?.installed
-                        ? "Official CLI found on this PC"
-                        : "Official CLI must be installed first"}
+                      {!cliStatus?.installed
+                        ? "Official CLI must be installed first"
+                        : cliStatus.detectionMethod && cliStatus.detectionMethod !== "PATH"
+                          ? `Official CLI found in ${cliStatus.detectionMethod}`
+                          : "Official CLI found on this PC"}
                     </small>
                   </div>
                   <div className="provider-actions">

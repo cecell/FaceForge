@@ -18,7 +18,13 @@ public sealed record CliProviderStatus(
     bool Installed,
     string? ExecutablePath,
     string AccountLabel,
-    string DocumentationUrl);
+    string DocumentationUrl,
+    /// <summary>
+    /// How the CLI was located: "PATH", the host application that ships it, or empty when it
+    /// was not found. The UI says so, because "installed" is confusing on a machine where the
+    /// user never installed anything themselves.
+    /// </summary>
+    string DetectionMethod);
 
 public sealed class CliVisionProvider
 {
@@ -230,14 +236,97 @@ public sealed class CliVisionProvider
         string accountLabel,
         string documentationUrl)
     {
+        // PATH first: an explicit install is a stated choice and must not be shadowed by
+        // whatever copy a host application happens to manage.
         var path = FindExecutable(command);
+        var detectionMethod = path is null ? "" : "PATH";
+        if (path is null)
+        {
+            var bundled = FindHostManagedExecutable(kind);
+            if (bundled is not null)
+            {
+                path = bundled.Value.Path;
+                detectionMethod = bundled.Value.HostName;
+            }
+        }
         return new CliProviderStatus(
             kind.ToString().ToLowerInvariant(),
             displayName,
             path is not null,
             path,
             accountLabel,
-            documentationUrl);
+            documentationUrl,
+            detectionMethod);
+    }
+
+    /// <summary>
+    /// Finds a CLI that a host application installs and updates on the user's behalf.
+    ///
+    /// Claude Desktop ships Claude Code, but it downloads it into its own user-data directory
+    /// and never puts it on PATH. A PATH-only probe therefore reports "not installed" on a
+    /// machine that already has a working, signed-in CLI, and sends the user off to install a
+    /// second copy for no reason. Only Claude has such a host today; the switch is the seam for
+    /// the next one.
+    /// </summary>
+    private static (string Path, string HostName)? FindHostManagedExecutable(
+        CliVisionProviderKind provider)
+    {
+        if (provider != CliVisionProviderKind.Claude) return null;
+        var path = FindNewestVersionedExecutable(ClaudeDesktopRoots(), "claude.exe");
+        return path is null ? null : (path, "Claude Desktop");
+    }
+
+    /// <summary>
+    /// Claude Desktop keeps the CLI under its Electron user-data directory. Roaming is where it
+    /// lives today; Local is probed too so that moving between the two data roots does not
+    /// silently break discovery.
+    /// </summary>
+    private static IEnumerable<string> ClaudeDesktopRoots()
+    {
+        if (!OperatingSystem.IsWindows()) yield break;
+        foreach (var folder in new[]
+                 {
+                     Environment.SpecialFolder.ApplicationData,
+                     Environment.SpecialFolder.LocalApplicationData
+                 })
+        {
+            var baseDirectory = Environment.GetFolderPath(folder);
+            if (string.IsNullOrEmpty(baseDirectory)) continue;
+            yield return Path.Combine(baseDirectory, "Claude", "claude-code");
+        }
+    }
+
+    /// <summary>
+    /// Picks the newest executable from a version-managed directory, where each release lands in
+    /// its own "major.minor.patch" folder and superseded ones are left in place.
+    ///
+    /// The ordering has to be numeric. Sorting the folder names as text puts "2.1.9" after
+    /// "2.1.237", which silently pins the CLI to an old build the moment a patch number reaches
+    /// two digits. A version folder whose executable is missing -- an interrupted download, or a
+    /// partially removed release -- is skipped rather than treated as the answer.
+    /// </summary>
+    internal static string? FindNewestVersionedExecutable(
+        IEnumerable<string> roots,
+        string executableName)
+    {
+        foreach (var root in roots)
+        {
+            if (!Directory.Exists(root)) continue;
+            var ordered = Directory.EnumerateDirectories(root)
+                .Select(directory => (
+                    Directory: directory,
+                    Version: Version.TryParse(Path.GetFileName(directory), out var version)
+                        ? version
+                        : null))
+                .Where(candidate => candidate.Version is not null)
+                .OrderByDescending(candidate => candidate.Version);
+            foreach (var candidate in ordered)
+            {
+                var executable = Path.Combine(candidate.Directory, executableName);
+                if (File.Exists(executable)) return Path.GetFullPath(executable);
+            }
+        }
+        return null;
     }
 
     private static string? FindExecutable(string command)

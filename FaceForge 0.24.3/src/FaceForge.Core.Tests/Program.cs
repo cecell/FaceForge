@@ -436,6 +436,35 @@ try
         Path.Combine(root, "result.json"));
     Assert(codexInvocation.Arguments.Contains("--image") &&
            codexInvocation.StandardInput is not null, "Codex image invocation");
+
+    // Claude Desktop manages its own copy of the Claude Code CLI in a version-per-folder
+    // directory and never places it on PATH, so discovery has to read that layout. Ordering the
+    // folder names as text would pin "2.1.9" above "2.1.237" and silently freeze the CLI on an
+    // old build, and a version folder can exist without a payload after an interrupted download.
+    var cliHost = Path.Combine(root, "claude-code");
+    foreach (var version in new[] { "2.1.9", "2.1.237", "not-a-version" })
+    {
+        Directory.CreateDirectory(Path.Combine(cliHost, version));
+        File.WriteAllText(Path.Combine(cliHost, version, "claude.exe"), "");
+    }
+    Directory.CreateDirectory(Path.Combine(cliHost, "3.0.0"));
+    Assert(
+        CliVisionProvider.FindNewestVersionedExecutable([cliHost], "claude.exe") ==
+        Path.Combine(cliHost, "2.1.237", "claude.exe"),
+        "host-managed CLI picks the newest complete version numerically");
+    File.WriteAllText(Path.Combine(cliHost, "3.0.0", "claude.exe"), "");
+    Assert(
+        CliVisionProvider.FindNewestVersionedExecutable([cliHost], "claude.exe") ==
+        Path.Combine(cliHost, "3.0.0", "claude.exe"),
+        "host-managed CLI adopts a newer version once its payload lands");
+    Assert(
+        CliVisionProvider.FindNewestVersionedExecutable(
+            [Path.Combine(root, "absent-host")], "claude.exe") is null,
+        "host-managed CLI probe tolerates a missing root");
+    Assert(
+        CliVisionProvider.GetStatus(CliVisionProviderKind.Codex).DetectionMethod.Length == 0 ||
+        CliVisionProvider.GetStatus(CliVisionProviderKind.Codex).Installed,
+        "detection method is reported only when a CLI was actually found");
     var claudeResponse = JsonSerializer.Serialize(new { result = visionContent });
     var claudeContent = CliVisionProvider.UnwrapProviderResponse(
         CliVisionProviderKind.Claude,

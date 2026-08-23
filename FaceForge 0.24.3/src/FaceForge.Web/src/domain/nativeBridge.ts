@@ -201,6 +201,12 @@ export interface CliProviderStatus {
   executablePath: string | null;
   accountLabel: string;
   documentationUrl: string;
+  /**
+   * How the CLI was located: "PATH", the host application that manages it (for example
+   * "Claude Desktop"), or "" when it was not found. Shown to the user, because "installed"
+   * reads as wrong on a machine where they never installed a CLI themselves.
+   */
+  detectionMethod: string;
 }
 
 export interface TemplatePayload {
