@@ -75,6 +75,86 @@ public sealed class CliVisionProvider
         GetStatuses().Single(item =>
             item.Id.Equals(provider.ToString(), StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// A provider's own authentication commands, where it exposes them.
+    ///
+    /// Verified against Claude Code 2.1.237: "auth status" prints {"loggedIn":true,...} and exits
+    /// 0, and "auth login" starts the interactive browser sign-in. Codex and Gemini organise
+    /// sign-in differently and are not verified here, so they return null and keep their current
+    /// behaviour rather than being driven with guessed flags.
+    /// </summary>
+    private static (IReadOnlyList<string> Status, IReadOnlyList<string> Login)? AuthCommands(
+        CliVisionProviderKind provider) =>
+        provider switch
+        {
+            CliVisionProviderKind.Claude => (["auth", "status"], ["auth", "login"]),
+            _ => null
+        };
+
+    /// <summary>
+    /// The arguments that start an interactive sign-in, or null when the provider has no dedicated
+    /// command and must be launched bare.
+    /// </summary>
+    public static IReadOnlyList<string>? LoginArguments(CliVisionProviderKind provider) =>
+        AuthCommands(provider)?.Login;
+
+    /// <summary>
+    /// Asks the CLI whether it is signed in, without spending a model request.
+    ///
+    /// Installed and signed-in are different states, and FaceForge previously modelled only the
+    /// first: a CLI that was present but not authenticated looked ready, and the user found out
+    /// only when Refine failed. This closes that gap before any photograph is sent.
+    ///
+    /// Returns null when the answer is genuinely unknown -- no status command, CLI missing, probe
+    /// failed. Unknown must never be rendered as "signed out"; a false sign-in warning is worse
+    /// than none, because only a positive answer tells the user to do something.
+    ///
+    /// Only the loggedIn flag is read. The command also reports the account email and
+    /// organisation; FaceForge has no use for either and keeps neither.
+    /// </summary>
+    public static async Task<bool?> GetSignedInAsync(
+        CliVisionProviderKind provider,
+        CancellationToken cancellationToken = default)
+    {
+        var commands = AuthCommands(provider);
+        if (commands is null) return null;
+        var status = GetStatus(provider);
+        if (!status.Installed || string.IsNullOrWhiteSpace(status.ExecutablePath)) return null;
+
+        try
+        {
+            var result = await RunAsync(
+                status.ExecutablePath,
+                commands.Value.Status,
+                Path.GetTempPath(),
+                null,
+                TimeSpan.FromSeconds(30),
+                cancellationToken);
+            return result.ExitCode == 0 ? ReadLoggedInFlag(result.StandardOutput) : null;
+        }
+        catch
+        {
+            // A status probe must never take the settings panel down with it.
+            return null;
+        }
+    }
+
+    internal static bool? ReadLoggedInFlag(string standardOutput)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(ExtractJson(standardOutput));
+            return document.RootElement.TryGetProperty("loggedIn", out var loggedIn) &&
+                   loggedIn.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? loggedIn.GetBoolean()
+                : null;
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidDataException)
+        {
+            return null;
+        }
+    }
+
     public async Task<VisionResult> AnalyzeAsync(
         CliVisionProviderKind provider,
         string imageDataUrl,
@@ -129,12 +209,14 @@ public sealed class CliVisionProvider
                 invocation.Arguments,
                 workRoot,
                 invocation.StandardInput,
+                TimeSpan.FromMinutes(3),
                 cancellationToken);
             if (processResult.ExitCode != 0)
-                throw new InvalidOperationException(
-                    $"{status.DisplayName} exited with code {processResult.ExitCode}. " +
-                    "Open Settings, connect the account, and try again. " +
-                    TrimError(processResult.StandardError));
+                throw new InvalidOperationException(DescribeCliFailure(
+                    status.DisplayName,
+                    processResult.ExitCode,
+                    processResult.StandardOutput,
+                    processResult.StandardError));
 
             var responseText = provider == CliVisionProviderKind.Codex
                 ? await ReadCodexResultAsync(resultPath, processResult.StandardOutput, cancellationToken)
@@ -356,10 +438,11 @@ public sealed class CliVisionProvider
         IReadOnlyList<string> arguments,
         string workingDirectory,
         string? standardInput,
+        TimeSpan runLimit,
         CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromMinutes(3));
+        timeout.CancelAfter(runLimit);
         var startInfo = CreateCaptureStartInfo(executable, arguments, workingDirectory);
         using var process = new Process { StartInfo = startInfo };
         if (!process.Start())
@@ -379,7 +462,8 @@ public sealed class CliVisionProvider
         catch (OperationCanceledException)
         {
             if (!process.HasExited) process.Kill(entireProcessTree: true);
-            throw new TaskCanceledException("The vision CLI exceeded the three-minute limit.");
+            throw new TaskCanceledException(
+                $"The vision CLI exceeded its {runLimit.TotalSeconds:0} second limit.");
         }
         var output = await outputTask;
         var error = await errorTask;
@@ -437,6 +521,50 @@ public sealed class CliVisionProvider
             return await File.ReadAllTextAsync(resultPath, cancellationToken);
         if (!string.IsNullOrWhiteSpace(standardOutput)) return standardOutput;
         throw new InvalidDataException("Codex returned no final response.");
+    }
+
+    /// <summary>
+    /// Explains a non-zero exit using what the CLI actually said.
+    ///
+    /// These CLIs report failures on stdout inside their own JSON envelope and leave stderr
+    /// empty. A CLI that has not been signed in for standalone use exits 1 with
+    /// {"is_error":true,"result":"Failed to authenticate: OAuth session expired ..."} -- and that
+    /// is the first state a new user hits, because signing in is the step before anything works.
+    /// Reading only stderr flattened every such case to "exited with code 1", which does not say
+    /// which of the fixable causes it was. The OpenRouter path already repeats the upstream
+    /// message; this brings the CLI path level with it.
+    /// </summary>
+    internal static string DescribeCliFailure(
+        string displayName,
+        int exitCode,
+        string standardOutput,
+        string standardError)
+    {
+        var detail = ExtractCliErrorText(standardOutput);
+        if (detail.Length == 0) detail = TrimError(standardError);
+        return $"{displayName} exited with code {exitCode}. "
+            + "Open Settings, connect the account, and try again."
+            + (detail.Length > 0 ? " " + detail : "");
+    }
+
+    private static string ExtractCliErrorText(string standardOutput)
+    {
+        if (string.IsNullOrWhiteSpace(standardOutput)) return "";
+        try
+        {
+            using var document = JsonDocument.Parse(standardOutput.Trim());
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("result", out var result) &&
+                result.ValueKind == JsonValueKind.String)
+            {
+                return TrimError(result.GetString() ?? "");
+            }
+        }
+        catch (JsonException)
+        {
+            // Not the JSON envelope -- Codex writes plain text. The caller falls back to stderr.
+        }
+        return "";
     }
 
     private static string TrimError(string value)

@@ -202,6 +202,9 @@ public partial class MainWindow : Window
                 case "vision-provider-status":
                     Post("vision-provider-status", CliVisionProvider.GetStatuses());
                     break;
+                case "vision-auth-status":
+                    await ReportVisionAuthAsync(root.GetProperty("provider").GetString());
+                    break;
                 case "connect-vision-provider":
                     ConnectVisionProvider(root.GetProperty("provider").GetString());
                     break;
@@ -432,17 +435,40 @@ public partial class MainWindow : Window
             });
             return;
         }
-        Process.Start(new ProcessStartInfo
+        // Prefer the CLI's own sign-in command. Launching it bare drops the user into a general
+        // session where signing in is a thing they have to know to ask for; "auth login" is the
+        // step they actually came here for.
+        var startInfo = new ProcessStartInfo
         {
             FileName = status.ExecutablePath,
             WorkingDirectory = Path.GetTempPath(),
             UseShellExecute = true
-        });
+        };
+        var login = CliVisionProvider.LoginArguments(kind);
+        if (login is not null) startInfo.Arguments = string.Join(' ', login);
+        Process.Start(startInfo);
         Post("vision-connect-started", new
         {
             provider = status.Id,
             installed = true,
             message = $"Finish the official {status.DisplayName} sign-in in the terminal window, then close it."
+        });
+    }
+
+    /// <summary>
+    /// Reports whether the chosen CLI is signed in. Installed and signed-in are different states,
+    /// and only the CLI can answer the second one; asking it costs no model request, so the answer
+    /// arrives before the user sends a photograph rather than after it fails.
+    /// </summary>
+    private async Task ReportVisionAuthAsync(string? provider)
+    {
+        if (!Enum.TryParse<CliVisionProviderKind>(provider, ignoreCase: true, out var kind))
+            throw new InvalidOperationException("Choose ChatGPT, Claude, or Gemini first.");
+        var signedIn = await CliVisionProvider.GetSignedInAsync(kind);
+        Post("vision-auth-status", new
+        {
+            provider = kind.ToString().ToLowerInvariant(),
+            signedIn
         });
     }
 

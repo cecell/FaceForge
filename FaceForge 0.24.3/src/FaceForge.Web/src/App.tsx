@@ -244,6 +244,13 @@ export default function App() {
   const [isRefining, setIsRefining] = useState(false);
   const [visionResult, setVisionResult] = useState<VisionResult | null>(null);
   const [providerStatuses, setProviderStatuses] = useState<CliProviderStatus[]>([]);
+  /**
+   * Sign-in state per provider id. Undefined means "not asked yet" and null means the CLI could
+   * not tell us -- neither is the same as signed out, and neither may be shown as a warning.
+   */
+  const [providerSignedIn, setProviderSignedIn] = useState<
+    Record<string, boolean | null | undefined>
+  >({});
   const [vision, setVision] = useState<VisionSettings>({
     enabled: false,
     provider: "codex",
@@ -430,6 +437,12 @@ export default function App() {
       case "vision-provider-status":
         setProviderStatuses(message.payload as CliProviderStatus[]);
         break;
+      case "vision-auth-status":
+        setProviderSignedIn((current) => ({
+          ...current,
+          [String(payload.provider)]: payload.signedIn as boolean | null
+        }));
+        break;
       case "vision-connect-started":
         setError(null);
         setNotice(String(payload.message ?? "The provider sign-in was opened."));
@@ -487,6 +500,15 @@ export default function App() {
   useEffect(() => {
     if (nativeAvailable) postNative({ type: "vision-provider-status" });
   }, [nativeAvailable]);
+
+  // Ask the selected CLI whether it is signed in. Re-runs when the statuses refresh, which is
+  // what happens after a sign-in completes, so the panel corrects itself without a restart.
+  useEffect(() => {
+    if (!nativeAvailable || vision.provider === "openrouter") return;
+    const status = providerStatuses.find((item) => item.id === vision.provider);
+    if (!status?.installed) return;
+    postNative({ type: "vision-auth-status", provider: vision.provider });
+  }, [nativeAvailable, vision.provider, providerStatuses]);
 
   useEffect(() => {
     if (!template || !nativeAvailable) return;
@@ -998,6 +1020,16 @@ export default function App() {
       setError("Install and connect the selected provider’s official CLI first.");
       return;
     }
+    // Only block on a definite "no". Undefined means we have not asked yet and null means the
+    // CLI could not say; guessing "signed out" would stop a request that would have worked.
+    if (vision.provider !== "openrouter" && providerSignedIn[vision.provider] === false) {
+      setSettingsOpen(true);
+      setError(
+        "The selected provider’s CLI is installed but not signed in. " +
+        "Open Settings and use Connect / sign in."
+      );
+      return;
+    }
     const assessedStyle = styleAssessment ?? assessImageStyle(imageElement, sourceMode);
     setStyleAssessment(assessedStyle);
     if (!analysis && assessedStyle.kind !== "stylized") {
@@ -1438,6 +1470,7 @@ export default function App() {
           nativeAvailable={nativeAvailable}
           vision={vision}
           providerStatuses={providerStatuses}
+          providerSignedIn={providerSignedIn}
           onVisionChange={setVision}
           onIndex={() => postNative({ type: "index-environment" })}
           onLoadIndexedPreset={(id) => postNative({ type: "load-indexed-template", id })}

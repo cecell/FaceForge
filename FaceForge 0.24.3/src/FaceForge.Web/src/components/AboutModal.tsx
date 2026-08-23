@@ -21,6 +21,8 @@ interface AboutModalProps {
   nativeAvailable: boolean;
   vision: VisionSettings;
   providerStatuses: CliProviderStatus[];
+  /** Per provider id: true signed in, false signed out, null/undefined not known. */
+  providerSignedIn: Record<string, boolean | null | undefined>;
   onVisionChange: (settings: VisionSettings) => void;
   onIndex: () => void;
   onLoadIndexedPreset: (id: string) => void;
@@ -44,6 +46,7 @@ export default function AboutModal({
   nativeAvailable,
   vision,
   providerStatuses,
+  providerSignedIn,
   onVisionChange,
   onIndex,
   onLoadIndexedPreset,
@@ -62,6 +65,9 @@ export default function AboutModal({
   const updateVision = (patch: Partial<VisionSettings>) =>
     onVisionChange({ ...vision, ...patch });
   const cliStatus = providerStatuses.find((item) => item.id === vision.provider);
+  // Only a definite false is actionable. Undefined (not asked) and null (the CLI could not say)
+  // must stay silent rather than warn about a sign-in that may already be done.
+  const signedIn = providerSignedIn[vision.provider];
   const usesOfficialCli = vision.provider !== "openrouter";
 
   return (
@@ -190,9 +196,13 @@ export default function AboutModal({
                     <small>
                       {!cliStatus?.installed
                         ? "Official CLI must be installed first"
-                        : cliStatus.detectionMethod && cliStatus.detectionMethod !== "PATH"
-                          ? `Official CLI found in ${cliStatus.detectionMethod}`
-                          : "Official CLI found on this PC"}
+                        : signedIn === false
+                          ? "Official CLI found, but not signed in yet"
+                          : cliStatus.detectionMethod && cliStatus.detectionMethod !== "PATH"
+                            ? `Official CLI found in ${cliStatus.detectionMethod}${
+                                signedIn ? " — signed in" : ""
+                              }`
+                            : `Official CLI found on this PC${signedIn ? " — signed in" : ""}`}
                     </small>
                   </div>
                   <div className="provider-actions">
@@ -201,7 +211,11 @@ export default function AboutModal({
                       className="compact-button"
                       onClick={() => onConnectProvider(vision.provider)}
                     >
-                      {cliStatus?.installed ? "Connect / sign in" : "Install"}
+                      {!cliStatus?.installed
+                        ? "Install"
+                        : signedIn === false
+                          ? "Sign in"
+                          : "Connect / sign in"}
                     </button>
                     <button
                       type="button"

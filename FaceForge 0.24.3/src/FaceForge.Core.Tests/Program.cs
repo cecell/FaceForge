@@ -465,6 +465,44 @@ try
         CliVisionProvider.GetStatus(CliVisionProviderKind.Codex).DetectionMethod.Length == 0 ||
         CliVisionProvider.GetStatus(CliVisionProviderKind.Codex).Installed,
         "detection method is reported only when a CLI was actually found");
+
+    // A CLI that has not been signed in for standalone use exits non-zero, writes its reason to
+    // stdout as JSON, and leaves stderr empty -- so stderr alone reduced it to "exited with code
+    // 1". That is the first failure a new user meets, and it names its own fix.
+    Assert(
+        CliVisionProvider.DescribeCliFailure(
+            "Claude via Claude Code",
+            1,
+            JsonSerializer.Serialize(new
+            {
+                is_error = true,
+                result = "Failed to authenticate: OAuth session expired and could not be refreshed"
+            }),
+            "").Contains("OAuth session expired", StringComparison.Ordinal),
+        "CLI failure repeats the reason the CLI reported on stdout");
+    Assert(
+        CliVisionProvider.DescribeCliFailure(
+                "Gemini via Gemini CLI", 2, "not json at all", "quota exhausted")
+            .Contains("quota exhausted", StringComparison.Ordinal),
+        "CLI failure falls back to stderr when stdout is not the JSON envelope");
+
+    // Installed and signed-in are different states. An unreadable answer has to stay unknown:
+    // rendering it as "signed out" would block a request that would have succeeded.
+    Assert(
+        CliVisionProvider.ReadLoggedInFlag(
+            """{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max"}""") == true,
+        "auth status reports a signed-in CLI");
+    Assert(
+        CliVisionProvider.ReadLoggedInFlag("""{"loggedIn":false}""") == false,
+        "auth status reports a signed-out CLI");
+    Assert(
+        CliVisionProvider.ReadLoggedInFlag("command not recognised") is null &&
+        CliVisionProvider.ReadLoggedInFlag("""{"somethingElse":1}""") is null,
+        "an unreadable auth answer stays unknown rather than becoming signed out");
+    Assert(
+        CliVisionProvider.LoginArguments(CliVisionProviderKind.Claude) is ["auth", "login"] &&
+        CliVisionProvider.LoginArguments(CliVisionProviderKind.Gemini) is null,
+        "sign-in arguments are used only for a provider whose command is verified");
     var claudeResponse = JsonSerializer.Serialize(new { result = visionContent });
     var claudeContent = CliVisionProvider.UnwrapProviderResponse(
         CliVisionProviderKind.Claude,
@@ -760,7 +798,7 @@ try
         "morph registry skips a races.ini entry pointing at a slider ini that is not installed");
 
     Console.WriteLine("FaceForge.Core validation: PASS");
-    Console.WriteLine($"Assertions: 96 | Presets: {catalog.Summary.PresetCount} | Plugins: {catalog.Summary.PluginCount}");
+    Console.WriteLine($"Assertions: 106 | Presets: {catalog.Summary.PresetCount} | Plugins: {catalog.Summary.PluginCount}");
 }
 finally
 {
